@@ -3,8 +3,16 @@ import AppKit
 /// Where the shelf anchors. DynamicNotchKit keeps its own notch math internal,
 /// so the collapsed hit target measures the hardware notch with public AppKit APIs.
 enum NotchScreen {
-    static func target() -> NSScreen? {
+    @MainActor
+    static func target(mode: DisplayMode? = nil) -> NSScreen? {
+        let effectiveMode = mode ?? AppPreferences.shared.displayMode
         let screens = NSScreen.screens
+        if effectiveMode == .activeScreen {
+            let mouse = NSEvent.mouseLocation
+            if let underCursor = screens.first(where: { $0.frame.contains(mouse) }) {
+                return underCursor
+            }
+        }
         if let notched = screens.first(where: { notchFrame(on: $0) != nil }) {
             return notched
         }

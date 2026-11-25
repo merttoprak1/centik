@@ -7,6 +7,8 @@ final class AppModel {
 
     let store = ShelfStore()
     let login = LoginItemController()
+    let prefs = AppPreferences.shared
+    private let settingsWindow = SettingsWindowController()
     private(set) var shelf: ShelfController?
 
     private init() {}
@@ -21,5 +23,9 @@ final class AppModel {
 
     func showShelf() {
         shelf?.presentPinned()
+    }
+
+    func openSettings() {
+        settingsWindow.show(store: store, login: login, prefs: prefs)
     }
 }

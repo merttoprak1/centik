@@ -1,20 +1,35 @@
 import AppKit
+import Combine
 import DynamicNotchKit
 import SwiftUI
 
+struct ShelfToast: Equatable {
+    let id = UUID()
+    let icon: String
+    let message: String
+}
+
+@MainActor
 final class ShelfChromeModel: ObservableObject {
     @Published var isDropTargeted = false
-    @Published var dropPulse = 0
+    @Published var isExpanded = false
     @Published var burstToken = 0
+    @Published var openToken = 0
     @Published var landingID: UUID?
+    @Published var hoveredItemID: UUID?
+    @Published var toast: ShelfToast?
     @Published var hasNotch = true
     @Published var notchHeight: CGFloat = 32
     var onContentFrame: ((CGRect) -> Void)?
     var onInternalDragBegan: (() -> Void)?
+    var onInternalDragEnded: (([UUID], NSDragOperation) -> Void)?
+    var onCelebrate: ((UUID?) -> Void)?
+    var onToast: ((String, String) -> Void)?
 }
 
 /// Opens and closes the DynamicNotchKit panel, and keeps the collapsed sensor in the notch.
 /// All calls are on the main thread: AppKit drag callbacks, the menu, and the pointer timer.
+@MainActor
 final class ShelfController {
     let store: ShelfStore
     let model = ShelfChromeModel()
@@ -22,6 +37,7 @@ final class ShelfController {
     private var notch: DynamicNotch<ShelfChromeView, EmptyView, EmptyView>?
     private var sensor: SensorPanel?
     private let promises = PromiseImporter()
+    private let hotKey = GlobalHotKey()
 
     private var phase: Phase = .collapsed
     private var opening = false
@@ -36,7 +52,14 @@ final class ShelfController {
     private var watch: Timer?
     private var globalDrag: Any?
     private var localDrag: Any?
+    private var localKey: Any?
+    private var armedURLs: [URL] = []
+    private var lastConsumedDragChangeCount = NSPasteboard(name: .drag).changeCount
+    private var recentDrop: (paths: [String], at: Date)?
     private var observers: [NSObjectProtocol] = []
+    private var cancellables: Set<AnyCancellable> = []
+    private var screenFollowTimer: Timer?
+    private var lastSensorScreenNumber: UInt32?
 
     private enum Phase {
         case collapsed
@@ -54,15 +77,94 @@ final class ShelfController {
         model.onInternalDragBegan = { [weak self] in
             self?.internalDrag = true
         }
+        model.onInternalDragEnded = { [weak self] ids, operation in
+            guard let self else { return }
+            self.internalDrag = false
+            self.store.handleDragCompleted(ids: ids, operation: operation)
+            if self.phase == .expanded {
+                self.scheduleCollapse()
+            }
+        }
+        model.onCelebrate = { [weak self] id in
+            self?.celebrate(newID: id)
+        }
+        model.onToast = { [weak self] icon, message in
+            self?.showToast(icon: icon, message: message)
+        }
         notch = DynamicNotch(
             hoverBehavior: [.increaseShadow],
             style: .auto
         ) {
-            ShelfChromeView(store: store, model: model)
+            ShelfChromeView(store: self.store, model: self.model)
         }
         applyMotion()
         installMonitors()
+        bindPreferences()
+        applyHotKey()
         layoutSensor(orderFront: true)
+    }
+
+    private func bindPreferences() {
+        let prefs = AppPreferences.shared
+        prefs.$hotKey
+            .combineLatest(prefs.$hotKeyEnabled)
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _, _ in
+                self?.applyHotKey()
+            }
+            .store(in: &cancellables)
+
+        prefs.$displayMode
+            .combineLatest(prefs.$showPillOnNonNotch)
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _, _ in
+                guard let self else { return }
+                self.updateScreenFollowTimer()
+                self.layoutSensor(orderFront: self.phase != .expanded)
+            }
+            .store(in: &cancellables)
+
+        updateScreenFollowTimer()
+    }
+
+    private func applyHotKey() {
+        let prefs = AppPreferences.shared
+        if prefs.hotKeyEnabled {
+            hotKey.register(combo: prefs.hotKey) { [weak self] in
+                self?.togglePinned()
+            }
+        } else {
+            hotKey.unregister()
+        }
+    }
+
+    private func updateScreenFollowTimer() {
+        screenFollowTimer?.invalidate()
+        screenFollowTimer = nil
+        guard AppPreferences.shared.displayMode == .activeScreen else { return }
+        let timer = Timer(timeInterval: 0.45, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.phase == .collapsed else { return }
+                guard let screen = NotchScreen.target() else { return }
+                let key = NSDeviceDescriptionKey(rawValue: "NSScreenNumber")
+                let screenNum = (screen.deviceDescription[key] as? NSNumber)?.uint32Value
+                if screenNum != self.lastSensorScreenNumber {
+                    self.layoutSensor(orderFront: true)
+                }
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        screenFollowTimer = timer
+    }
+
+    func togglePinned() {
+        if phase == .expanded {
+            collapse()
+        } else {
+            presentPinned()
+        }
     }
 
     func presentPinned() {
@@ -108,7 +210,7 @@ final class ShelfController {
     }
 
     var wantsExclusiveDrop: Bool {
-        guard !internalDrag else { return false }
+        guard externalDrag, !internalDrag else { return false }
         return DropPayload.hasFileDrag(NSPasteboard(name: .drag))
     }
 
@@ -117,11 +219,12 @@ final class ShelfController {
         externalDrag = true
         model.isDropTargeted = true
         expand()
-        return .copy
+        return AppPreferences.shared.fileMode == .move ? .move : .copy
     }
 
     func draggingUpdated() -> NSDragOperation {
-        internalDrag ? [] : .copy
+        guard !internalDrag else { return [] }
+        return AppPreferences.shared.fileMode == .move ? .move : .copy
     }
 
     func draggingExited() {
@@ -129,22 +232,46 @@ final class ShelfController {
     }
 
     func performDrop(_ pasteboard: NSPasteboard) -> Bool {
+        lastConsumedDragChangeCount = NSPasteboard(name: .drag).changeCount
         let urls = DropPayload.fileURLs(from: pasteboard)
         if !urls.isEmpty {
             accept(urls: urls)
             return true
         }
-        if let image = DropPayload.image(from: pasteboard),
-           let id = store.addImageData(image.0, fileExtension: image.1) {
-            celebrate(newID: id)
+        if let image = DropPayload.image(from: pasteboard) {
+            Task { @MainActor in
+                if let id = await self.store.addImageData(image.0, fileExtension: image.1) {
+                    self.celebrate(newID: id)
+                }
+            }
             return true
         }
-        return promises.receive(from: pasteboard) { [weak self] urls in
-            self?.accept(urls: urls)
+        if promises.receive(from: pasteboard, completion: { [weak self] urls, tempDirectory in
+            self?.accept(urls: urls, cleanupDirectory: tempDirectory)
+        }) {
+            return true
         }
+        if let web = DropPayload.webURL(from: pasteboard) {
+            Task { @MainActor in
+                if let id = await self.store.addWebURL(web.url, title: web.title) {
+                    self.celebrate(newID: id)
+                }
+            }
+            return true
+        }
+        if let text = DropPayload.text(from: pasteboard) {
+            Task { @MainActor in
+                if let id = await self.store.addText(text) {
+                    self.celebrate(newID: id)
+                }
+            }
+            return true
+        }
+        return false
     }
 
     func draggingEnded() {
+        lastConsumedDragChangeCount = NSPasteboard(name: .drag).changeCount
         model.isDropTargeted = false
         externalDrag = false
         if phase == .expanded {
@@ -161,9 +288,20 @@ final class ShelfController {
         }
         opening = true
         phase = .expanded
+        model.isExpanded = false
+        model.openToken += 1
         applyMotion()
         Task { @MainActor in
-            await notch.expand(on: screen)
+            async let shown: Void = notch.expand(on: screen)
+            for _ in 0..<30 {
+                if self.notch?.windowController?.window != nil {
+                    self.attachPassThrough()
+                    break
+                }
+                try? await Task.sleep(for: .milliseconds(8))
+            }
+            self.model.isExpanded = true
+            await shown
             self.attachPassThrough()
             self.opening = false
             self.startWatch()
@@ -185,29 +323,81 @@ final class ShelfController {
         pinned = false
         visitedWhilePinned = false
         model.isDropTargeted = false
+        model.isExpanded = false
+        model.hoveredItemID = nil
+        model.toast = nil
+        store.clearSelection()
         Task { @MainActor in
             await notch.hide()
             self.layoutSensor(orderFront: true)
         }
     }
 
-    private func accept(urls: [URL]) {
-        let ids = store.add(urls: urls)
-        guard let first = ids.first else { return }
-        celebrate(newID: first)
+    private func accept(urls: [URL], cleanupDirectory: URL? = nil) {
+        let paths = urls.map { $0.standardizedFileURL.path }
+        if let recentDrop, recentDrop.paths == paths, Date().timeIntervalSince(recentDrop.at) < 1 {
+            if let cleanupDirectory {
+                try? FileManager.default.removeItem(at: cleanupDirectory)
+            }
+            return
+        }
+        recentDrop = (paths, Date())
+
+        let volumes = urls.filter { (try? $0.resourceValues(forKeys: [.isVolumeKey]).isVolume) == true }
+        let acceptable = urls.filter { (try? $0.resourceValues(forKeys: [.isVolumeKey]).isVolume) != true }
+
+        if !volumes.isEmpty {
+            model.isDropTargeted = false
+            showToast(
+                icon: "externaldrive.badge.xmark",
+                message: volumes.count == 1 ? "Can't move a disk" : "Can't move disks"
+            )
+        }
+
+        guard !acceptable.isEmpty else {
+            if let cleanupDirectory {
+                try? FileManager.default.removeItem(at: cleanupDirectory)
+            }
+            return
+        }
+
+        Task { @MainActor in
+            let ids = await self.store.add(urls: acceptable)
+            if let cleanupDirectory {
+                try? FileManager.default.removeItem(at: cleanupDirectory)
+            }
+            guard let first = ids.first else { return }
+            self.celebrate(newID: first, count: ids.count)
+        }
     }
 
-    private func celebrate(newID: UUID?) {
-        model.dropPulse += 1
+    private func celebrate(newID: UUID?, count: Int = 1) {
         model.burstToken += 1
         model.landingID = newID
         model.isDropTargeted = false
         Haptics.land()
+        if count > 1 {
+            showToast(icon: "checkmark.circle.fill", message: "Added \(count) items")
+        }
         let token = newID
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(750))
             if self.model.landingID == token {
                 self.model.landingID = nil
+            }
+        }
+    }
+
+    private func showToast(icon: String, message: String) {
+        let toast = ShelfToast(icon: icon, message: message)
+        model.toast = toast
+        Haptics.tick()
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(1500))
+            if self.model.toast?.id == toast.id {
+                withAnimation(.easeOut(duration: 0.22)) {
+                    self.model.toast = nil
+                }
             }
         }
     }
@@ -244,6 +434,7 @@ final class ShelfController {
 
     private func attachPassThrough() {
         guard let window = notch?.windowController?.window else { return }
+        window.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.draggingWindow)) - 1)
         window.appearance = NSAppearance(named: .darkAqua)
         window.collectionBehavior.formUnion([.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle])
         window.isExcludedFromWindowsMenu = true
@@ -268,6 +459,8 @@ final class ShelfController {
             sensor?.orderOut(nil)
             return
         }
+        let key = NSDeviceDescriptionKey(rawValue: "NSScreenNumber")
+        lastSensorScreenNumber = (screen.deviceDescription[key] as? NSNumber)?.uint32Value
         let frame = NotchScreen.collapsedFrame(on: screen)
         let notched = NotchScreen.hasNotch(screen)
         model.hasNotch = notched
@@ -281,7 +474,7 @@ final class ShelfController {
             panel.controller = self
             sensor = panel
         }
-        panel.updateChrome(hasNotch: notched)
+        panel.updateChrome(hasNotch: notched, showPill: AppPreferences.shared.showPillOnNonNotch)
         panel.alphaValue = 1
         if orderFront {
             panel.orderFrontRegardless()
@@ -322,7 +515,7 @@ final class ShelfController {
         guard phase == .expanded, !opening else { return }
         collapseWork?.cancel()
         let work = DispatchWorkItem { [weak self] in
-            self?.collapseIfIdle()
+            MainActor.assumeIsolated { self?.collapseIfIdle() }
         }
         collapseWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.42, execute: work)
@@ -336,7 +529,7 @@ final class ShelfController {
     private func collapseIfIdle() {
         guard phase == .expanded, !opening else { return }
         if pinned, !visitedWhilePinned { return }
-        if pointerInside || externalDrag || internalDrag || menuTracking || model.isDropTargeted { return }
+        if pointerInside || externalDrag || internalDrag || menuTracking || model.isDropTargeted || QuickLookController.shared.isVisible { return }
         if shelfContains(NSEvent.mouseLocation) {
             pointerInside = true
             return
@@ -347,7 +540,7 @@ final class ShelfController {
     private func startWatch() {
         guard watch == nil else { return }
         let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
-            self?.evaluatePointer()
+            MainActor.assumeIsolated { self?.evaluatePointer() }
         }
         RunLoop.main.add(timer, forMode: .common)
         watch = timer
@@ -358,29 +551,55 @@ final class ShelfController {
         watch = nil
     }
 
-    private func handlePointerDrag(type: NSEvent.EventType, location: NSPoint) {
+    private func handlePointerDrag(type: NSEvent.EventType, location: NSPoint, isLocal: Bool) {
         if type == .leftMouseUp {
-            let wasDragging = externalDrag || internalDrag
+            var urls = armedURLs
+            armedURLs = []
+            let wasExternal = externalDrag
+            let wasInternal = internalDrag
+            let dragPB = NSPasteboard(name: .drag)
+            let isFreshDrag = dragPB.changeCount != lastConsumedDragChangeCount
+            let overTarget = shelfContains(location) || (sensor.map { NotchScreen.catchRect(around: $0.frame).contains(location) } ?? false)
+            if urls.isEmpty, wasExternal, isFreshDrag, overTarget {
+                urls = DropPayload.fileURLs(from: dragPB)
+            }
+            if wasExternal {
+                lastConsumedDragChangeCount = dragPB.changeCount
+            }
             externalDrag = false
             internalDrag = false
-            if wasDragging, phase == .expanded {
-                fadeSensorOut()
+            model.isDropTargeted = false
+            if wasExternal, isFreshDrag, overTarget, !urls.isEmpty {
+                accept(urls: urls)
+                return
+            }
+            if (wasExternal || wasInternal), phase == .expanded {
+                if wasExternal {
+                    fadeSensorOut()
+                }
                 scheduleCollapse()
             }
             return
         }
-        guard !internalDrag, DropPayload.hasFileDrag(NSPasteboard(name: .drag)) else { return }
+        guard !isLocal, !internalDrag else { return }
+        let dragPB = NSPasteboard(name: .drag)
+        guard dragPB.changeCount != lastConsumedDragChangeCount,
+              DropPayload.hasFileDrag(dragPB) else { return }
         let nearSensor = sensor.map { NotchScreen.catchRect(around: $0.frame).contains(location) } ?? false
         if nearSensor || shelfContains(location) {
             externalDrag = true
+            let urls = DropPayload.fileURLs(from: dragPB)
+            if !urls.isEmpty { armedURLs = urls }
             expand()
+        } else {
+            armedURLs = []
         }
     }
 
     private func screensChanged() {
         let showSensor = phase != .expanded
         layoutSensor(orderFront: showSensor)
-        guard phase == .expanded, let screen = NotchScreen.target(), let notch else { return }
+        guard phase == .expanded, NotchScreen.target() != nil, let notch else { return }
         Task { @MainActor in
             await notch.hide()
             self.phase = .collapsed
@@ -390,22 +609,81 @@ final class ShelfController {
         }
     }
 
+    private func handleKeyDown(_ event: NSEvent) -> Bool {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        switch event.keyCode {
+        case 49 where flags.isEmpty: // Space -> Quick Look
+            let targets: [ShelfItem]
+            if !store.selectedValidItems.isEmpty {
+                targets = store.selectedValidItems
+            } else if let hovered = model.hoveredItemID,
+                      let item = store.items.first(where: { $0.id == hovered && !$0.isMissing }) {
+                targets = [item]
+            } else if let first = store.validItems.first {
+                targets = [first]
+            } else {
+                return false
+            }
+            store.quickLook(targets)
+            return true
+        case 53: // Escape
+            if QuickLookController.shared.isVisible {
+                QuickLookController.shared.close()
+                return true
+            }
+            if !store.selectedIDs.isEmpty {
+                store.clearSelection()
+                return true
+            }
+            collapse()
+            return true
+        case 0 where flags == .command: // Cmd+A
+            store.selectAll()
+            return true
+        case 8 where flags == .command: // Cmd+C
+            if !store.selectedValidItems.isEmpty {
+                let count = store.selectedValidItems.count
+                store.copyFiles(store.selectedValidItems)
+                showToast(icon: "doc.on.doc.fill", message: count == 1 ? "Copied file" : "Copied \(count) files")
+                return true
+            } else if let hovered = model.hoveredItemID,
+                      let item = store.items.first(where: { $0.id == hovered && !$0.isMissing }) {
+                store.copyFiles([item])
+                showToast(icon: "doc.on.doc.fill", message: "Copied file")
+                return true
+            }
+            return false
+        case 51 where flags.isEmpty, 117 where flags.isEmpty: // Backspace / Delete
+            if !store.selectedIDs.isEmpty {
+                store.remove(ids: Array(store.selectedIDs))
+                return true
+            }
+            return false
+        default:
+            return false
+        }
+    }
+
     private func installMonitors() {
         let mask: NSEvent.EventTypeMask = [.leftMouseDragged, .leftMouseUp]
         globalDrag = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] event in
             let type = event.type
             let location = NSEvent.mouseLocation
             Task { @MainActor in
-                self?.handlePointerDrag(type: type, location: location)
+                self?.handlePointerDrag(type: type, location: location, isLocal: false)
             }
         }
         localDrag = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
             let type = event.type
             let location = NSEvent.mouseLocation
             Task { @MainActor in
-                self?.handlePointerDrag(type: type, location: location)
+                self?.handlePointerDrag(type: type, location: location, isLocal: true)
             }
             return event
+        }
+        localKey = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self, self.phase == .expanded else { return event }
+            return self.handleKeyDown(event) ? nil : event
         }
         observers.append(NotificationCenter.default.addObserver(
             forName: NSMenu.didBeginTrackingNotification,
@@ -445,7 +723,7 @@ final class PromiseImporter: NSObject {
     }()
 
     @discardableResult
-    func receive(from pasteboard: NSPasteboard, completion: @escaping ([URL]) -> Void) -> Bool {
+    func receive(from pasteboard: NSPasteboard, completion: @escaping ([URL], URL?) -> Void) -> Bool {
         guard let found = pasteboard.readObjects(forClasses: [NSFilePromiseReceiver.self], options: nil) as? [NSFilePromiseReceiver],
               !found.isEmpty else {
             return false
@@ -456,7 +734,7 @@ final class PromiseImporter: NSObject {
         do {
             try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
         } catch {
-            completion([])
+            completion([], nil)
             return true
         }
         let group = DispatchGroup()
@@ -474,7 +752,7 @@ final class PromiseImporter: NSObject {
             }
         }
         group.notify(queue: .main) { [weak self] in
-            completion(urls)
+            completion(urls, destination)
             self?.receivers.removeAll { candidate in
                 found.contains { $0 === candidate }
             }

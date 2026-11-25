@@ -16,10 +16,12 @@ final class SensorPanel: NSPanel {
         isOpaque = false
         backgroundColor = .clear
         hasShadow = false
-        level = NSWindow.Level(rawValue: NSWindow.Level.statusBar.rawValue + 1)
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         hidesOnDeactivate = false
         isFloatingPanel = true
+        // isFloatingPanel forces .floating, and AppKit then keeps the panel under the menu bar.
+        // Stay under the drag image so this window can receive the drop.
+        level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.draggingWindow)) - 1)
         becomesKeyOnlyIfNeeded = true
         isMovable = false
         animationBehavior = .none
@@ -39,13 +41,17 @@ final class SensorPanel: NSPanel {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
+        frameRect
+    }
+
     var controller: ShelfController? {
         get { root.controller }
         set { root.controller = newValue }
     }
 
-    func updateChrome(hasNotch: Bool) {
-        root.setHasNotch(hasNotch)
+    func updateChrome(hasNotch: Bool, showPill: Bool = true) {
+        root.setChrome(hasNotch: hasNotch, showPill: showPill)
     }
 }
 
@@ -62,12 +68,27 @@ final class SensorRoot: NSView {
         fatalError("SensorRoot is created in code")
     }
 
-    func setHasNotch(_ hasNotch: Bool) {
-        if let hosting {
-            hosting.rootView = SensorChrome(hasNotch: hasNotch)
+    func setChrome(hasNotch: Bool, showPill: Bool) {
+        if hasNotch || !showPill {
+            hosting?.removeFromSuperview()
+            hosting = nil
+            wantsLayer = true
+            layer?.frame = bounds
+            // Nearly-transparent hit surface keeps hover & drag targets alive without showing a bar.
+            layer?.backgroundColor = hasNotch
+                ? NSColor.black.cgColor
+                : NSColor.black.withAlphaComponent(0.005).cgColor
+            layer?.cornerRadius = hasNotch ? 12 : 0
+            layer?.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
+            layer?.masksToBounds = true
             return
         }
-        let host = SensorHost(rootView: SensorChrome(hasNotch: hasNotch))
+        layer?.backgroundColor = nil
+        if let hosting {
+            hosting.rootView = SensorChrome()
+            return
+        }
+        let host = SensorHost(rootView: SensorChrome())
         if #available(macOS 13.3, *) {
             host.safeAreaRegions = []
         }
@@ -133,10 +154,8 @@ final class SensorHost: NSHostingView<SensorChrome> {
 }
 
 struct SensorChrome: View {
-    var hasNotch: Bool
-
     var body: some View {
-        let radius: CGFloat = hasNotch ? 16 : 12
+        let radius: CGFloat = 12
         let shape = UnevenRoundedRectangle(
             cornerRadii: RectangleCornerRadii(
                 topLeading: 0,
@@ -149,11 +168,9 @@ struct SensorChrome: View {
         shape
             .fill(Color.black)
             .overlay {
-                if !hasNotch {
-                    shape
-                        .stroke(Color.white.opacity(0.2), lineWidth: 0.7)
-                        .padding(0.4)
-                }
+                shape
+                    .stroke(Color.white.opacity(0.2), lineWidth: 0.7)
+                    .padding(0.4)
             }
             .ignoresSafeArea()
     }

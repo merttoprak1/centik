@@ -3,19 +3,21 @@ import os
 
 /// Stores bookmarks to the original files. Temporary drag sources are copied
 /// into Application Support so they survive after the source deletes them.
-struct ShelfPersistence {
+struct ShelfPersistence: Sendable {
     private let log = Logger(subsystem: "app.centik.Centik", category: "shelf")
-    private let encoder: JSONEncoder = {
+
+    private func makeEncoder() -> JSONEncoder {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
         return encoder
-    }()
-    private let decoder: JSONDecoder = {
+    }
+
+    private func makeDecoder() -> JSONDecoder {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         return decoder
-    }()
+    }
 
     private var supportDirectory: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
@@ -33,7 +35,7 @@ struct ShelfPersistence {
 
     func load() -> [ShelfItem] {
         guard let data = try? Data(contentsOf: indexURL),
-              let file = try? decoder.decode(PersistedShelf.self, from: data) else {
+              let file = try? makeDecoder().decode(PersistedShelf.self, from: data) else {
             return []
         }
         return file.items.map { restore($0) }
@@ -43,14 +45,14 @@ struct ShelfPersistence {
         do {
             try FileManager.default.createDirectory(at: supportDirectory, withIntermediateDirectories: true)
             let file = PersistedShelf(version: 1, items: items.map(persist))
-            let data = try encoder.encode(file)
+            let data = try makeEncoder().encode(file)
             try data.write(to: indexURL, options: .atomic)
         } catch {
             log.error("Could not save the shelf: \(error.localizedDescription, privacy: .public)")
         }
     }
 
-    func importFile(at url: URL) -> ShelfItem {
+    func importFile(at url: URL, moveToShelf: Bool = true) -> ShelfItem {
         let id = UUID()
         let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .localizedNameKey])
         let isDirectory = values?.isDirectory ?? false
@@ -66,6 +68,7 @@ struct ShelfPersistence {
                 isDirectory: isDirectory,
                 isMissing: false,
                 storedCopyRelativePath: relative,
+                movedFromPath: nil,
                 bookmarkData: bookmark,
                 pathFallback: standardized.path,
                 addedAt: Date()
@@ -83,8 +86,27 @@ struct ShelfPersistence {
                 isDirectory: isDirectory,
                 isMissing: false,
                 storedCopyRelativePath: relative,
+                movedFromPath: nil,
                 bookmarkData: bookmark,
                 pathFallback: copy.path,
+                addedAt: Date()
+            )
+        }
+
+        if moveToShelf, let moved = moveIntoStorage(standardized, id: id) {
+            let relative = relativeStoredPath(for: moved)
+            let bookmark = makeBookmark(for: moved) ?? Data()
+            let movedValues = try? moved.resourceValues(forKeys: [.localizedNameKey])
+            return ShelfItem(
+                id: id,
+                displayName: movedValues?.localizedName ?? displayName,
+                resolvedURL: moved,
+                isDirectory: isDirectory,
+                isMissing: false,
+                storedCopyRelativePath: relative,
+                movedFromPath: standardized.path,
+                bookmarkData: bookmark,
+                pathFallback: moved.path,
                 addedAt: Date()
             )
         }
@@ -97,6 +119,7 @@ struct ShelfPersistence {
             isDirectory: isDirectory,
             isMissing: !exists(standardized),
             storedCopyRelativePath: nil,
+            movedFromPath: nil,
             bookmarkData: bookmark,
             pathFallback: standardized.path,
             addedAt: Date()
@@ -114,6 +137,169 @@ struct ShelfPersistence {
         } catch {
             log.error("Could not store dropped image: \(error.localizedDescription, privacy: .public)")
             return nil
+        }
+    }
+
+    func saveWebURL(_ webURL: URL, title: String?) -> URL? {
+        let id = UUID()
+        let directory = filesDirectory.appendingPathComponent(id.uuidString, isDirectory: true)
+        let rawName = (title?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? title! : nil)
+            ?? webURL.host
+            ?? "Link"
+        let baseName = Self.sanitizedFilename(rawName, fallback: "Link")
+        let url = directory.appendingPathComponent(baseName).appendingPathExtension("webloc")
+        let plist: [String: Any] = ["URL": webURL.absoluteString]
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let data = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
+            try data.write(to: url, options: .atomic)
+            return url
+        } catch {
+            log.error("Could not store dropped URL: \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
+    }
+
+    func saveText(_ text: String) -> URL? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let id = UUID()
+        let directory = filesDirectory.appendingPathComponent(id.uuidString, isDirectory: true)
+        let firstLine = trimmed.components(separatedBy: .newlines).first ?? "Snippet"
+        let baseName = Self.sanitizedFilename(firstLine, fallback: "Snippet")
+        let url = directory.appendingPathComponent(baseName).appendingPathExtension("txt")
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try text.write(to: url, atomically: true, encoding: .utf8)
+            return url
+        } catch {
+            log.error("Could not store dropped text: \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
+    }
+
+    func createZip(from urls: [URL], archiveName: String? = nil) -> URL? {
+        guard !urls.isEmpty else { return nil }
+        let id = UUID()
+        let directory = filesDirectory.appendingPathComponent(id.uuidString, isDirectory: true)
+        let staging = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CentikZip-\(id.uuidString)", isDirectory: true)
+
+        let baseName: String
+        if let archiveName, !archiveName.isEmpty {
+            baseName = Self.sanitizedFilename(archiveName, fallback: "Archive")
+        } else if urls.count == 1 {
+            baseName = Self.sanitizedFilename(urls[0].deletingPathExtension().lastPathComponent, fallback: "Archive")
+        } else {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyy-MM-dd-HHmmss"
+            baseName = "Shelf-\(formatter.string(from: Date()))"
+        }
+        let zipURL = directory.appendingPathComponent(baseName).appendingPathExtension("zip")
+
+        defer { try? FileManager.default.removeItem(at: staging) }
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let sourceToZip: URL
+            let keepParent: Bool
+            if urls.count == 1 {
+                sourceToZip = urls[0]
+                keepParent = true
+            } else {
+                try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
+                for url in urls {
+                    let target = uniqueDestination(in: staging, filename: url.lastPathComponent)
+                    try FileManager.default.copyItem(at: url, to: target)
+                }
+                sourceToZip = staging
+                keepParent = false
+            }
+
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
+            var args = ["-c", "-k", "--sequesterRsrc"]
+            if keepParent { args.append("--keepParent") }
+            args.append(contentsOf: [sourceToZip.path, zipURL.path])
+            process.arguments = args
+            try process.run()
+            process.waitUntilExit()
+
+            guard process.terminationStatus == 0, FileManager.default.fileExists(atPath: zipURL.path) else {
+                try? FileManager.default.removeItem(at: directory)
+                return nil
+            }
+            return zipURL
+        } catch {
+            log.error("Could not create zip archive: \(error.localizedDescription, privacy: .public)")
+            try? FileManager.default.removeItem(at: directory)
+            return nil
+        }
+    }
+
+    private func uniqueDestination(in directory: URL, filename: String) -> URL {
+        var candidate = directory.appendingPathComponent(filename)
+        var counter = 2
+        let stem = candidate.deletingPathExtension().lastPathComponent
+        let ext = candidate.pathExtension
+        while FileManager.default.fileExists(atPath: candidate.path) {
+            let name = ext.isEmpty ? "\(stem) \(counter)" : "\(stem) \(counter).\(ext)"
+            candidate = directory.appendingPathComponent(name)
+            counter += 1
+        }
+        return candidate
+    }
+
+    private static func sanitizedFilename(_ raw: String, fallback: String) -> String {
+        let illegal = CharacterSet(charactersIn: "/:\\?%*|\"<>")
+        let cleaned = raw
+            .components(separatedBy: illegal)
+            .joined(separator: "-")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let prefix = String(cleaned.prefix(48)).trimmingCharacters(in: CharacterSet(charactersIn: ". "))
+        return prefix.isEmpty ? fallback : prefix
+    }
+
+    /// Restores a moved file back to its original folder, or deletes a temporary/generated copy.
+    /// Returns the restored destination URL when a moved file was returned.
+    @discardableResult
+    func restoreOrDelete(_ item: ShelfItem) -> URL? {
+        if let movedFromPath = item.movedFromPath,
+           let relativePath = item.storedCopyRelativePath {
+            let storedURL = filesDirectory.appendingPathComponent(relativePath)
+            guard FileManager.default.fileExists(atPath: storedURL.path) else {
+                cleanupEmptyContainer(relativePath: relativePath)
+                return nil
+            }
+            let originalURL = URL(fileURLWithPath: movedFromPath)
+            let parentDir: URL
+            if FileManager.default.fileExists(atPath: originalURL.deletingLastPathComponent().path) {
+                parentDir = originalURL.deletingLastPathComponent()
+            } else {
+                parentDir = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first
+                    ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Desktop", isDirectory: true)
+            }
+            let destination = uniqueDestination(in: parentDir, filename: originalURL.lastPathComponent)
+            do {
+                try FileManager.default.moveItem(at: storedURL, to: destination)
+                cleanupEmptyContainer(relativePath: relativePath)
+                return destination
+            } catch {
+                log.error("Could not restore shelved file to \(destination.path, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                return nil
+            }
+        }
+        deleteStoredCopy(relativePath: item.storedCopyRelativePath)
+        return nil
+    }
+
+    func cleanupEmptyContainer(relativePath: String?) {
+        guard let relativePath, !relativePath.isEmpty else { return }
+        let file = filesDirectory.appendingPathComponent(relativePath)
+        let directory = file.deletingLastPathComponent()
+        guard directory.path.hasPrefix(filesDirectory.path), directory.path != filesDirectory.path else { return }
+        let contents = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
+        if contents.isEmpty {
+            try? FileManager.default.removeItem(at: directory)
         }
     }
 
@@ -186,6 +372,7 @@ struct ShelfPersistence {
             isDirectory: stored.isDirectory,
             isMissing: true,
             storedCopyRelativePath: stored.storedCopyRelativePath,
+            movedFromPath: stored.movedFromPath,
             bookmarkData: stored.bookmark,
             pathFallback: stored.pathFallback,
             addedAt: stored.addedAt
@@ -199,6 +386,7 @@ struct ShelfPersistence {
             bookmark: item.bookmarkData,
             pathFallback: item.pathFallback,
             storedCopyRelativePath: item.storedCopyRelativePath,
+            movedFromPath: item.movedFromPath,
             isDirectory: item.isDirectory,
             addedAt: item.addedAt
         )
@@ -240,6 +428,20 @@ struct ShelfPersistence {
         let accessing = url.startAccessingSecurityScopedResource()
         defer { if accessing { url.stopAccessingSecurityScopedResource() } }
         return FileManager.default.fileExists(atPath: url.path)
+    }
+
+    private func moveIntoStorage(_ url: URL, id: UUID) -> URL? {
+        let directory = filesDirectory.appendingPathComponent(id.uuidString, isDirectory: true)
+        let destination = directory.appendingPathComponent(url.lastPathComponent)
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try FileManager.default.moveItem(at: url, to: destination)
+            return destination
+        } catch {
+            try? FileManager.default.removeItem(at: directory)
+            log.info("Falling back to bookmark for \(url.lastPathComponent, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            return nil
+        }
     }
 
     private func copyIntoStorage(_ url: URL, id: UUID) -> URL? {

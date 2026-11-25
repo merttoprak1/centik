@@ -4,9 +4,10 @@ import SwiftUI
 struct StatusMenu: View {
     @ObservedObject var store: ShelfStore
     @ObservedObject var login: LoginItemController
+    @ObservedObject var prefs: AppPreferences = .shared
 
     var body: some View {
-        Button("Show Shelf") {
+        Button(prefs.hotKeyEnabled ? "Show Shelf (\(prefs.hotKey.displayString))" : "Show Shelf") {
             AppModel.shared.showShelf()
         }
 
@@ -14,7 +15,14 @@ struct StatusMenu: View {
             store.clear()
         }
         .disabled(store.items.isEmpty)
-        .help("Take everything off the shelf. Files you already had stay where they are.")
+        .help("Return files to their original folders and clear the shelf.")
+
+        Divider()
+
+        Button("Settings…") {
+            AppModel.shared.openSettings()
+        }
+        .keyboardShortcut(",")
 
         Toggle("Launch at Login", isOn: Binding(
             get: { login.isEnabled },
@@ -33,6 +41,8 @@ struct StatusMenu: View {
         }
 
         Divider()
+
+        Text("Version \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")")
 
         Button("Quit Centik") {
             NSApp.terminate(nil)

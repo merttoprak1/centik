@@ -7,13 +7,22 @@ struct ShelfItem: Identifiable, Equatable {
     var isDirectory: Bool
     var isMissing: Bool
     var storedCopyRelativePath: String?
+    var movedFromPath: String?
     var bookmarkData: Data
     var pathFallback: String?
     var addedAt: Date
 
+    var originalFolderName: String? {
+        guard let movedFromPath else { return nil }
+        return URL(fileURLWithPath: movedFromPath).deletingLastPathComponent().lastPathComponent
+    }
+
     var tooltip: String {
         if isMissing {
             return "\(displayName) — original file is missing"
+        }
+        if let movedFromPath {
+            return "\(displayName) (from \(URL(fileURLWithPath: movedFromPath).deletingLastPathComponent().lastPathComponent))"
         }
         return resolvedURL?.path ?? displayName
     }
@@ -30,6 +39,7 @@ struct PersistedShelfItem: Codable {
     var bookmark: Data
     var pathFallback: String?
     var storedCopyRelativePath: String?
+    var movedFromPath: String?
     var isDirectory: Bool
     var addedAt: Date
 }

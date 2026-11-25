@@ -24,6 +24,11 @@
 		AA0000000000000000000036 /* DropBurstView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000035 /* DropBurstView.swift */; };
 		AA0000000000000000000038 /* ShelfChromeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000037 /* ShelfChromeView.swift */; };
 		AA000000000000000000003A /* ShelfItemView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000039 /* ShelfItemView.swift */; };
+		AA0000000000000000000052 /* GlobalHotKey.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000051 /* GlobalHotKey.swift */; };
+		AA0000000000000000000054 /* QuickLookController.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000053 /* QuickLookController.swift */; };
+		AA0000000000000000000056 /* MultiFileDragView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000055 /* MultiFileDragView.swift */; };
+		AA0000000000000000000058 /* AppPreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000057 /* AppPreferences.swift */; };
+		AA000000000000000000005A /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000059 /* SettingsView.swift */; };
 		AA000000000000000000003C /* DropLand.json in Resources */ = {isa = PBXBuildFile; fileRef = AA000000000000000000003B /* DropLand.json */; };
 		AA000000000000000000003E /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = AA000000000000000000003D /* Assets.xcassets */; };
 		AA0000000000000000000016 /* DynamicNotchKit in Frameworks */ = {isa = PBXBuildFile; productRef = AA0000000000000000000013 /* DynamicNotchKit */; };
@@ -50,6 +55,11 @@
 		AA0000000000000000000035 /* DropBurstView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DropBurstView.swift; sourceTree = "<group>"; };
 		AA0000000000000000000037 /* ShelfChromeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShelfChromeView.swift; sourceTree = "<group>"; };
 		AA0000000000000000000039 /* ShelfItemView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShelfItemView.swift; sourceTree = "<group>"; };
+		AA0000000000000000000051 /* GlobalHotKey.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlobalHotKey.swift; sourceTree = "<group>"; };
+		AA0000000000000000000053 /* QuickLookController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuickLookController.swift; sourceTree = "<group>"; };
+		AA0000000000000000000055 /* MultiFileDragView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MultiFileDragView.swift; sourceTree = "<group>"; };
+		AA0000000000000000000057 /* AppPreferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppPreferences.swift; sourceTree = "<group>"; };
+		AA0000000000000000000059 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		AA000000000000000000003B /* DropLand.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = DropLand.json; sourceTree = "<group>"; };
 		AA000000000000000000003D /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		AA000000000000000000003F /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
@@ -111,9 +121,12 @@
 		AA0000000000000000000045 /* Support */ = {
 			isa = PBXGroup;
 			children = (
+				AA0000000000000000000057 /* AppPreferences.swift */,
+				AA0000000000000000000051 /* GlobalHotKey.swift */,
 				AA000000000000000000002F /* Haptics.swift */,
 				AA0000000000000000000031 /* LoginItemController.swift */,
 				AA0000000000000000000033 /* MenuBarIcon.swift */,
+				AA0000000000000000000053 /* QuickLookController.swift */,
 			);
 			path = Support;
 			sourceTree = "<group>";
@@ -122,6 +135,8 @@
 			isa = PBXGroup;
 			children = (
 				AA0000000000000000000035 /* DropBurstView.swift */,
+				AA0000000000000000000055 /* MultiFileDragView.swift */,
+				AA0000000000000000000059 /* SettingsView.swift */,
 				AA0000000000000000000037 /* ShelfChromeView.swift */,
 				AA0000000000000000000039 /* ShelfItemView.swift */,
 			);
@@ -265,6 +280,11 @@
 				AA0000000000000000000036 /* DropBurstView.swift in Sources */,
 				AA0000000000000000000038 /* ShelfChromeView.swift in Sources */,
 				AA000000000000000000003A /* ShelfItemView.swift in Sources */,
+				AA0000000000000000000052 /* GlobalHotKey.swift in Sources */,
+				AA0000000000000000000054 /* QuickLookController.swift in Sources */,
+				AA0000000000000000000056 /* MultiFileDragView.swift in Sources */,
+				AA0000000000000000000058 /* AppPreferences.swift in Sources */,
+				AA000000000000000000005A /* SettingsView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

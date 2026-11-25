@@ -16,6 +16,8 @@ final class PassThroughBox: NSView {
         fatalError("PassThroughBox is created in code")
     }
 
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
     override func hitTest(_ point: NSPoint) -> NSView? {
         guard let window else { return nil }
         let local = convert(point, from: superview)
@@ -57,12 +59,14 @@ enum ShelfDragTypes {
     static var all: [NSPasteboard.PasteboardType] {
         var types: [NSPasteboard.PasteboardType] = [
             .fileURL,
+            .URL,
+            .string,
             .png,
             .tiff,
             NSPasteboard.PasteboardType(UTType.jpeg.identifier),
             NSPasteboard.PasteboardType("NSFilenamesPboardType")
         ]
-        types.append(contentsOf: NSFilePromiseReceiver.readableDraggedTypes())
+        types.append(contentsOf: NSFilePromiseReceiver.readableDraggedTypes.map { NSPasteboard.PasteboardType($0) })
         return types
     }
 }

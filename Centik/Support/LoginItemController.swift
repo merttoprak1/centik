@@ -2,6 +2,7 @@ import Combine
 import Foundation
 import ServiceManagement
 
+@MainActor
 final class LoginItemController: ObservableObject {
     @Published private(set) var isEnabled = false
     @Published private(set) var needsApproval = false

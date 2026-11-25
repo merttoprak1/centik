@@ -20,7 +20,17 @@ struct CentikApp: App {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
+        terminateOtherInstances()
         AppModel.shared.start()
+    }
+
+    private func terminateOtherInstances() {
+        guard let bundleID = Bundle.main.bundleIdentifier else { return }
+        let currentPID = ProcessInfo.processInfo.processIdentifier
+        for app in NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+        where app.processIdentifier != currentPID {
+            app.terminate()
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {

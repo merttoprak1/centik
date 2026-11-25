@@ -10,4 +10,8 @@ enum Haptics {
     static func land() {
         NSHapticFeedbackManager.defaultPerformer.perform(.levelChange, performanceTime: .now)
     }
+
+    static func tick() {
+        NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
+    }
 }
