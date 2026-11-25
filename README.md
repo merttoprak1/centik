@@ -4,9 +4,7 @@ A minimalist, native macOS file shelf anchored to the MacBook notch.
 
 Drag files, folders, links, or text toward the notch to tuck them away, then drag them right back out wherever you need them. On Macs without a notch or on external displays, Centik adapts cleanly into a top-center pill (or an invisible top-edge trigger).
 
-<!-- Add your demo GIF or screenshot here:
 ![Centik Demo](docs/demo.gif)
--->
 
 ## Features
 
